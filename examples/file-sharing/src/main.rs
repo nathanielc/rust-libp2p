@@ -27,7 +27,7 @@ use clap::Parser;
 
 use futures::prelude::*;
 use futures::StreamExt;
-use libp2p::{core::Multiaddr, multiaddr::Protocol};
+use libp2p::core::Multiaddr;
 use std::error::Error;
 use std::io::Write;
 use std::path::PathBuf;
@@ -46,27 +46,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // In case a listen address was provided use it, otherwise listen on any
     // address.
-    match opt.listen_address {
-        Some(addr) => network_client
+    for addr in opt.listen_addresses {
+        network_client
             .start_listening(addr)
             .await
-            .expect("Listening not to fail."),
-        None => network_client
-            .start_listening("/ip4/0.0.0.0/tcp/0".parse()?)
-            .await
-            .expect("Listening not to fail."),
-    };
-
-    // In case the user provided an address of a peer on the CLI, dial it.
-    if let Some(addr) = opt.peer {
-        let peer_id = match addr.iter().last() {
-            Some(Protocol::P2p(peer_id)) => peer_id,
-            _ => return Err("Expect peer multiaddr to contain peer ID.".into()),
-        };
-        network_client
-            .dial(peer_id, addr)
-            .await
-            .expect("Dial to succeed");
+            .expect("Listening should not to fail.")
     }
 
     match opt.argument {
@@ -124,11 +108,11 @@ struct Opt {
     #[clap(long)]
     secret_key_seed: Option<u8>,
 
-    #[clap(long)]
-    peer: Option<Multiaddr>,
+    #[clap(long, use_value_delimiter = true, value_delimiter = ',')]
+    peers: Vec<Multiaddr>,
 
-    #[clap(long)]
-    listen_address: Option<Multiaddr>,
+    #[clap(long, use_value_delimiter = true, value_delimiter = ',')]
+    listen_addresses: Vec<Multiaddr>,
 
     #[clap(subcommand)]
     argument: CliArgument,

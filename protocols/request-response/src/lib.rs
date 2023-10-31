@@ -75,6 +75,7 @@ pub mod json;
 
 pub use codec::Codec;
 pub use handler::ProtocolSupport;
+use log::info;
 
 use crate::handler::protocol::RequestProtocol;
 use futures::channel::oneshot;
@@ -631,6 +632,11 @@ where
             .map(|p: usize| connections.remove(p))
             .expect("Expected connection to be established before closing.");
 
+        info!(
+            "on_connection_closed {connection_id} {} {remaining_established}",
+            connections.len()
+        );
+
         debug_assert_eq!(connections.is_empty(), remaining_established == 0);
         if connections.is_empty() {
             self.connected.remove(&peer_id);
@@ -655,7 +661,16 @@ where
         }
     }
 
-    fn on_dial_failure(&mut self, DialFailure { peer_id, .. }: DialFailure) {
+    fn on_dial_failure(
+        &mut self,
+        DialFailure {
+            peer_id,
+            connection_id,
+            error,
+            ..
+        }: DialFailure,
+    ) {
+        info!("on_dial_failure {connection_id} {error:?}");
         if let Some(peer) = peer_id {
             // If there are pending outgoing requests when a dial failure occurs,
             // it is implied that we are not connected to the peer, since pending
@@ -721,6 +736,7 @@ where
             self.next_inbound_id.clone(),
         );
 
+        info!("handle_established_inbound_connection {connection_id}");
         self.preload_new_handler(&mut handler, peer, connection_id, None);
 
         Ok(handler)
@@ -764,6 +780,7 @@ where
             self.next_inbound_id.clone(),
         );
 
+        info!("handle_established_outbound_connection {connection_id}");
         self.preload_new_handler(
             &mut handler,
             peer,

@@ -6,16 +6,18 @@ use futures::prelude::*;
 use libp2p::{
     core::Multiaddr,
     identity, kad,
+    mdns::{self, async_io::AsyncIo},
     multiaddr::Protocol,
     noise,
     request_response::{self, ProtocolSupport, RequestId, ResponseChannel},
-    swarm::{NetworkBehaviour, Swarm, SwarmEvent},
+    swarm::{dial_opts::DialOpts, NetworkBehaviour, Swarm, SwarmEvent},
     tcp, yamux, PeerId,
 };
 
 use libp2p::StreamProtocol;
+use libp2p_connection_limits::ConnectionLimits;
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 
 /// Creates the network components, namely:
@@ -59,6 +61,11 @@ pub(crate) async fn new(
                 )],
                 request_response::Config::default(),
             ),
+            limits: libp2p_connection_limits::Behaviour::new(
+                ConnectionLimits::default().with_max_established_per_peer(Some(2)),
+            ),
+            mdns: mdns::Behaviour::new(mdns::Config::default(), peer_id)
+                .expect("should construct mdns behaviour"),
         })?
         .build();
 
@@ -93,24 +100,6 @@ impl Client {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Command::StartListening { addr, sender })
-            .await
-            .expect("Command receiver not to be dropped.");
-        receiver.await.expect("Sender not to be dropped.")
-    }
-
-    /// Dial the given peer at the given address.
-    pub(crate) async fn dial(
-        &mut self,
-        peer_id: PeerId,
-        peer_addr: Multiaddr,
-    ) -> Result<(), Box<dyn Error + Send>> {
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Command::Dial {
-                peer_id,
-                peer_addr,
-                sender,
-            })
             .await
             .expect("Command receiver not to be dropped.");
         receiver.await.expect("Sender not to be dropped.")
@@ -210,7 +199,10 @@ impl EventLoop {
 
     async fn handle_event(
         &mut self,
-        event: SwarmEvent<BehaviourEvent, Either<void::Void, io::Error>>,
+        event: SwarmEvent<
+            BehaviourEvent,
+            Either<Either<Either<void::Void, io::Error>, void::Void>, void::Void>,
+        >,
     ) {
         match event {
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
@@ -298,6 +290,25 @@ impl EventLoop {
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 request_response::Event::ResponseSent { .. },
             )) => {}
+            SwarmEvent::Behaviour(BehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
+                for (peer_id, addr) in peers {
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, addr.clone());
+                    let is_connected = self.swarm.is_connected(&peer_id);
+                    eprintln!(
+                        "mdns: discovered {} at {} (connected: {:?})",
+                        peer_id, addr, is_connected
+                    );
+                    if !is_connected {
+                        let dial_opts = DialOpts::peer_id(peer_id).addresses(vec![addr]).build();
+                        if let Err(e) = Swarm::dial(&mut self.swarm, dial_opts) {
+                            eprintln!("invalid dial options: {:?}", e);
+                        }
+                    }
+                }
+            }
             SwarmEvent::NewListenAddr { address, .. } => {
                 let local_peer_id = *self.swarm.local_peer_id();
                 eprintln!(
@@ -339,28 +350,6 @@ impl EventLoop {
                     Ok(_) => sender.send(Ok(())),
                     Err(e) => sender.send(Err(Box::new(e))),
                 };
-            }
-            Command::Dial {
-                peer_id,
-                peer_addr,
-                sender,
-            } => {
-                if let hash_map::Entry::Vacant(e) = self.pending_dial.entry(peer_id) {
-                    self.swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .add_address(&peer_id, peer_addr.clone());
-                    match self.swarm.dial(peer_addr.with(Protocol::P2p(peer_id))) {
-                        Ok(()) => {
-                            e.insert(sender);
-                        }
-                        Err(e) => {
-                            let _ = sender.send(Err(Box::new(e)));
-                        }
-                    }
-                } else {
-                    todo!("Already dialing peer.");
-                }
             }
             Command::StartProviding { file_name, sender } => {
                 let query_id = self
@@ -406,17 +395,14 @@ impl EventLoop {
 struct Behaviour {
     request_response: request_response::cbor::Behaviour<FileRequest, FileResponse>,
     kademlia: kad::Behaviour<kad::record::store::MemoryStore>,
+    limits: libp2p_connection_limits::Behaviour,
+    mdns: mdns::Behaviour<AsyncIo>,
 }
 
 #[derive(Debug)]
 enum Command {
     StartListening {
         addr: Multiaddr,
-        sender: oneshot::Sender<Result<(), Box<dyn Error + Send>>>,
-    },
-    Dial {
-        peer_id: PeerId,
-        peer_addr: Multiaddr,
         sender: oneshot::Sender<Result<(), Box<dyn Error + Send>>>,
     },
     StartProviding {
