@@ -6,17 +6,22 @@ use futures::prelude::*;
 use libp2p::{
     core::Multiaddr,
     identity, kad,
+    mdns::{self, async_io::AsyncIo},
     multiaddr::Protocol,
     noise,
     request_response::{self, OutboundRequestId, ProtocolSupport, ResponseChannel},
-    swarm::{NetworkBehaviour, Swarm, SwarmEvent},
+    swarm::{dial_opts::DialOpts, NetworkBehaviour, Swarm, SwarmEvent},
     tcp, yamux, PeerId,
 };
 
 use libp2p::StreamProtocol;
+use libp2p_connection_limits::ConnectionLimits;
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map, HashMap, HashSet};
 use std::error::Error;
+use std::{
+    collections::{hash_map, HashMap, HashSet},
+    time::Duration,
+};
 
 /// Creates the network components, namely:
 ///
@@ -59,7 +64,12 @@ pub(crate) async fn new(
                 )],
                 request_response::Config::default(),
             ),
+            mdns: mdns::Behaviour::new(mdns::Config::default(), key.public().into()).unwrap(),
+            connection_limits: libp2p_connection_limits::Behaviour::new(
+                ConnectionLimits::default().with_max_established_per_peer(Some(2)),
+            ),
         })?
+        .with_swarm_config(|config| config.with_idle_connection_timeout(Duration::from_secs(5)))
         .build();
 
     swarm
@@ -210,7 +220,10 @@ impl EventLoop {
 
     async fn handle_event(
         &mut self,
-        event: SwarmEvent<BehaviourEvent, Either<void::Void, io::Error>>,
+        event: SwarmEvent<
+            BehaviourEvent,
+            Either<Either<Either<void::Void, io::Error>, void::Void>, void::Void>,
+        >,
     ) {
         match event {
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
@@ -298,6 +311,28 @@ impl EventLoop {
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 request_response::Event::ResponseSent { .. },
             )) => {}
+            SwarmEvent::Behaviour(BehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
+                for (peer_id, addr) in peers {
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, addr.clone());
+                    let is_connected = self.swarm.is_connected(&peer_id);
+                    eprintln!(
+                        "mdns: discovered {} at {} (connected: {:?})",
+                        peer_id, addr, is_connected
+                    );
+                    if !is_connected {
+                        let dial_opts = DialOpts::peer_id(peer_id)
+                            .condition(libp2p::swarm::dial_opts::PeerCondition::Always)
+                            .addresses(vec![addr])
+                            .build();
+                        if let Err(e) = Swarm::dial(&mut self.swarm, dial_opts) {
+                            eprintln!("invalid dial options: {:?}", e);
+                        }
+                    }
+                }
+            }
             SwarmEvent::NewListenAddr { address, .. } => {
                 let local_peer_id = *self.swarm.local_peer_id();
                 eprintln!(
@@ -406,6 +441,8 @@ impl EventLoop {
 struct Behaviour {
     request_response: request_response::cbor::Behaviour<FileRequest, FileResponse>,
     kademlia: kad::Behaviour<kad::store::MemoryStore>,
+    mdns: mdns::Behaviour<AsyncIo>,
+    connection_limits: libp2p_connection_limits::Behaviour,
 }
 
 #[derive(Debug)]

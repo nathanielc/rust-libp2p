@@ -75,6 +75,7 @@ pub mod json;
 
 pub use codec::Codec;
 pub use handler::ProtocolSupport;
+use log::info;
 
 use crate::handler::OutboundMessage;
 use futures::channel::oneshot;
@@ -642,6 +643,7 @@ where
             ..
         }: ConnectionClosed,
     ) {
+        info!("on_connection_closed {connection_id}");
         let connections = self
             .connected
             .get_mut(&peer_id)
@@ -677,7 +679,15 @@ where
         }
     }
 
-    fn on_dial_failure(&mut self, DialFailure { peer_id, .. }: DialFailure) {
+    fn on_dial_failure(
+        &mut self,
+        DialFailure {
+            peer_id,
+            connection_id,
+            ..
+        }: DialFailure,
+    ) {
+        info!("on_dial_failure {connection_id}");
         if let Some(peer) = peer_id {
             // If there are pending outgoing requests when a dial failure occurs,
             // it is implied that we are not connected to the peer, since pending
@@ -735,6 +745,7 @@ where
         _: &Multiaddr,
         _: &Multiaddr,
     ) -> Result<THandler<Self>, ConnectionDenied> {
+        info!("handle_established_inbound_connection {connection_id}");
         let mut handler = Handler::new(
             self.inbound_protocols.clone(),
             self.codec.clone(),
@@ -778,6 +789,7 @@ where
         remote_address: &Multiaddr,
         _: Endpoint,
     ) -> Result<THandler<Self>, ConnectionDenied> {
+        info!("handle_established_outbound_connection {connection_id}");
         let mut handler = Handler::new(
             self.inbound_protocols.clone(),
             self.codec.clone(),
